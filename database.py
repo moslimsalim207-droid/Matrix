@@ -64,6 +64,7 @@ def save_student_data(student_id, name, email, face_encoding, photo_filename):
         logger.error("فشل الاتصال بقاعدة البيانات")
         return False
     
+    cur = None  # ✅ تعريف المتغير بشكل آمن
     try:
         cur = conn.cursor()
         
@@ -104,15 +105,15 @@ def save_student_data(student_id, name, email, face_encoding, photo_filename):
         conn.commit()
         logger.info(f"تم حفظ بيانات الطالب: {student_id}")
         
-        db.close_connection(conn, cur)
         return True
     
     except psycopg2.Error as e:
         logger.error(f"خطأ في حفظ البيانات: {str(e)}")
         if conn:
             conn.rollback()
-        db.close_connection(conn, cur)
         return False
+    finally:
+        db.close_connection(conn, cur)
 
 def save_attendance(attendance_record):
     """
@@ -131,19 +132,18 @@ def save_attendance(attendance_record):
         logger.error("فشل الاتصال بقاعدة البيانات")
         return False
     
+    cur = None  # ✅ تعريف آمن
     try:
         cur = conn.cursor()
         
-        # التحقق من عدم التسجيل مسبقاً في نفس المحاضرة
+        # ✅ التحقق من عدم التسجيل مسبقاً في نفس المحاضرة (بدون فحص التاريخ)
         cur.execute("""
             SELECT id FROM attendance 
-            WHERE student_id = %s AND lecture_id = %s 
-            AND DATE(check_in_time) = CURRENT_DATE
+            WHERE student_id = %s AND lecture_id = %s
         """, (attendance_record['student_id'], attendance_record['lecture_id']))
         
         if cur.fetchone():
-            logger.warning(f"الطالب {attendance_record['student_id']} مسجل مسبقاً")
-            db.close_connection(conn, cur)
+            logger.warning(f"الطالب {attendance_record['student_id']} مسجل مسبقاً في هذه المحاضرة")
             return False
         
         # إدراج تسجيل الحضور
@@ -161,15 +161,15 @@ def save_attendance(attendance_record):
         conn.commit()
         logger.info(f"تم تسجيل حضور الطالب: {attendance_record['student_id']}")
         
-        db.close_connection(conn, cur)
         return True
     
     except psycopg2.Error as e:
         logger.error(f"خطأ في حفظ الحضور: {str(e)}")
         if conn:
             conn.rollback()
-        db.close_connection(conn, cur)
         return False
+    finally:
+        db.close_connection(conn, cur)
 
 def load_all_face_encodings():
     """
@@ -185,6 +185,7 @@ def load_all_face_encodings():
         logger.error("فشل الاتصال بقاعدة البيانات")
         return [], [], []
     
+    cur = None  # ✅ تعريف آمن
     try:
         cur = conn.cursor()
         
@@ -214,14 +215,14 @@ def load_all_face_encodings():
                 continue
         
         logger.info(f"تم تحميل {len(encodings)} بصمة وجه")
-        db.close_connection(conn, cur)
         
         return encodings, names, student_ids
     
     except psycopg2.Error as e:
         logger.error(f"خطأ في تحميل البصمات: {str(e)}")
-        db.close_connection(conn, cur)
         return [], [], []
+    finally:
+        db.close_connection(conn, cur)
 
 def get_attendance_report(lecture_id):
     """
@@ -240,6 +241,7 @@ def get_attendance_report(lecture_id):
         logger.error("فشل الاتصال بقاعدة البيانات")
         return []
     
+    cur = None  # ✅ تعريف آمن
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
@@ -257,14 +259,14 @@ def get_attendance_report(lecture_id):
         """, (lecture_id,))
         
         records = cur.fetchall()
-        db.close_connection(conn, cur)
         
         return records
     
     except psycopg2.Error as e:
         logger.error(f"خطأ في جلب التقرير: {str(e)}")
-        db.close_connection(conn, cur)
         return []
+    finally:
+        db.close_connection(conn, cur)
 
 def get_student_by_id(student_id):
     """
@@ -282,6 +284,7 @@ def get_student_by_id(student_id):
     if not conn:
         return None
     
+    cur = None  # ✅ تعريف آمن
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
@@ -291,14 +294,14 @@ def get_student_by_id(student_id):
         )
         
         record = cur.fetchone()
-        db.close_connection(conn, cur)
         
         return record
     
     except psycopg2.Error as e:
         logger.error(f"خطأ في جلب بيانات الطالب: {str(e)}")
-        db.close_connection(conn, cur)
         return None
+    finally:
+        db.close_connection(conn, cur)
 
 def get_all_lectures():
     """الحصول على جميع المحاضرات"""
@@ -308,6 +311,7 @@ def get_all_lectures():
     if not conn:
         return []
     
+    cur = None  # ✅ تعريف آمن
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
@@ -318,14 +322,50 @@ def get_all_lectures():
         """)
         
         records = cur.fetchall()
-        db.close_connection(conn, cur)
         
         return records
     
     except psycopg2.Error as e:
         logger.error(f"خطأ في جلب المحاضرات: {str(e)}")
-        db.close_connection(conn, cur)
         return []
+    finally:
+        db.close_connection(conn, cur)
+
+# ✅ دالة جديدة للتحقق من وجود المحاضرة
+def get_lecture_by_id(lecture_id):
+    """
+    الحصول على بيانات المحاضرة من معرفها
+    
+    Args:
+        lecture_id: معرف المحاضرة
+    
+    Returns:
+        dict: بيانات المحاضرة أو None
+    """
+    db = Database()
+    conn = db.get_connection()
+    
+    if not conn:
+        return None
+    
+    cur = None  # ✅ تعريف آمن
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute(
+            "SELECT * FROM lectures WHERE id = %s",
+            (lecture_id,)
+        )
+        
+        record = cur.fetchone()
+        
+        return record
+    
+    except psycopg2.Error as e:
+        logger.error(f"خطأ في جلب بيانات المحاضرة: {str(e)}")
+        return None
+    finally:
+        db.close_connection(conn, cur)
 
 def add_attendance_log(student_id, action, details, ip_address=None):
     """
@@ -346,6 +386,7 @@ def add_attendance_log(student_id, action, details, ip_address=None):
     if not conn:
         return False
     
+    cur = None  # ✅ تعريف آمن
     try:
         cur = conn.cursor()
         
@@ -356,7 +397,6 @@ def add_attendance_log(student_id, action, details, ip_address=None):
         """, (student_id, action, details, ip_address))
         
         conn.commit()
-        db.close_connection(conn, cur)
         
         return True
     
@@ -364,5 +404,6 @@ def add_attendance_log(student_id, action, details, ip_address=None):
         logger.error(f"خطأ في إضافة السجل: {str(e)}")
         if conn:
             conn.rollback()
-        db.close_connection(conn, cur)
         return False
+    finally:
+        db.close_connection(conn, cur)
