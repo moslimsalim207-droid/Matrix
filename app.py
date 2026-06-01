@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import os
 import logging
+import threading
 from functools import wraps
 
 from config import Config
@@ -11,14 +12,15 @@ from error_handler import register_error_handlers
 from utils.face_recognition import extract_face_encoding, find_best_match
 from utils.eye_detection import check_eye_openness
 from utils.image_processing import preprocess_image, validate_image, detect_blur
-from utils.database import (
+from database import (
     save_attendance,
     save_student_data,
     load_all_face_encodings,
     get_attendance_report,
     get_student_by_id,
     get_all_lectures,
-    add_attendance_log
+    add_attendance_log,
+    get_lecture_by_id
 )
 
 # إعداد السجلات
@@ -42,10 +44,25 @@ register_error_handlers(app)
 # إنشاء مجلد الرفع إذا لم يكن موجوداً
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+# ✅ إضافة قفل للحماية من تضارب الخيوط
+face_encoding_lock = threading.RLock()
+known_face_encodings = []
+known_face_names = []
+student_ids = []
+
 # تحميل بصمات الوجه عند بدء التطبيق
-logger.info("جاري تحميل بصمات الوجه...")
-known_face_encodings, known_face_names, student_ids = load_all_face_encodings()
-logger.info(f"تم تحميل {len(known_face_encodings)} بصمة وجه")
+def reload_encodings():
+    """تحديث بصمات الوجه بشكل آمن"""
+    global known_face_encodings, known_face_names, student_ids
+    try:
+        logger.info("جاري تحميل بصمات الوجه...")
+        with face_encoding_lock:
+            known_face_encodings, known_face_names, student_ids = load_all_face_encodings()
+        logger.info(f"تم تحميل {len(known_face_encodings)} بصمة وجه")
+    except Exception as e:
+        logger.error(f"خطأ في تحميل البصمات: {str(e)}")
+
+reload_encodings()
 
 def require_post(f):
     """Decorator للتحقق من طريقة الطلب"""
@@ -161,9 +178,8 @@ def register():
             )
             
             if success:
-                # تحديث قائمة البصمات المحملة
-                global known_face_encodings, known_face_names, student_ids
-                known_face_encodings, known_face_names, student_ids = load_all_face_encodings()
+                # تحديث قائمة البصمات المحملة بشكل آمن
+                reload_encodings()
                 
                 logger.info(f"تم تسجيل طالب جديد: {student_id}")
                 add_attendance_log(None, 'registration', f'تسجيل طالب جديد: {student_id}')
@@ -202,6 +218,14 @@ def attendance():
                 'status': 'error',
                 'message': 'المحاضرة والصورة مطلوبة'
             }), 400
+        
+        # ✅ التحقق من وجود المحاضرة
+        lecture = get_lecture_by_id(lecture_id)
+        if not lecture:
+            return jsonify({
+                'status': 'error',
+                'message': 'المحاضرة غير موجودة'
+            }), 404
         
         # قراءة الصورة
         file_content = file.read()
@@ -248,32 +272,33 @@ def attendance():
             }), 400
         
         # البحث عن الطالب المطابق
-        if not known_face_encodings:
-            logger.error("لا توجد بصمات مخزنة")
-            return jsonify({
-                'status': 'error',
-                'message': 'النظام لم يتم تسجيل أي طلاب بعد'
-            }), 400
-        
-        best_match_index, best_distance = find_best_match(
-            known_face_encodings,
-            face_encoding,
-            tolerance=Config.FACE_RECOGNITION_TOLERANCE
-        )
-        
-        if best_match_index == -1:
-            logger.warning("لم يتم العثور على طالب مطابق")
-            add_attendance_log(None, 'unrecognized', 'محاولة تسجيل حضور لشخص غير معروف')
+        with face_encoding_lock:
+            if not known_face_encodings:
+                logger.error("لا توجد بصمات مخزنة")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'النظام لم يتم تسجيل أي طلاب بعد'
+                }), 400
             
-            return jsonify({
-                'status': 'error',
-                'message': 'لم يتم التعرف على هذا الطالب'
-            }), 404
-        
-        # الحصول على معلومات الطالب
-        student_db_id, student_id = student_ids[best_match_index]
-        student_name = known_face_names[best_match_index]
-        confidence = 1 - best_distance
+            best_match_index, best_distance = find_best_match(
+                known_face_encodings,
+                face_encoding,
+                tolerance=Config.FACE_RECOGNITION_TOLERANCE
+            )
+            
+            if best_match_index == -1:
+                logger.warning("لم يتم العثور على طالب مطابق")
+                add_attendance_log(None, 'unrecognized', 'محاولة تسجيل حضور لشخص غير معروف')
+                
+                return jsonify({
+                    'status': 'error',
+                    'message': 'لم يتم التعرف على هذا الطالب'
+                }), 404
+            
+            # الحصول على معلومات الطالب
+            student_db_id, student_id = student_ids[best_match_index]
+            student_name = known_face_names[best_match_index]
+            confidence = 1 - best_distance
         
         # حفظ صورة الحضور
         filename = f"{student_id}_attendance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
@@ -329,6 +354,14 @@ def reports():
                 'status': 'error',
                 'message': 'معرف المحاضرة مطلوب'
             }), 400
+        
+        # ✅ التحقق من وجود المحاضرة
+        lecture = get_lecture_by_id(lecture_id)
+        if not lecture:
+            return jsonify({
+                'status': 'error',
+                'message': 'المحاضرة غير موجودة'
+            }), 404
         
         attendance_data = get_attendance_report(lecture_id)
         
@@ -392,9 +425,12 @@ def get_lectures():
 @app.route('/health')
 def health_check():
     """فحص صحة النظام"""
+    with face_encoding_lock:
+        encoding_count = len(known_face_encodings)
+    
     return jsonify({
         'status': 'healthy',
-        'loaded_encodings': len(known_face_encodings),
+        'loaded_encodings': encoding_count,
         'timestamp': datetime.now().isoformat()
     })
 
@@ -417,7 +453,9 @@ def after_request(response):
 
 if __name__ == '__main__':
     logger.info("جاري بدء التطبيق...")
-    logger.info(f"عدد البصمات المحملة: {len(known_face_encodings)}")
+    with face_encoding_lock:
+        encoding_count = len(known_face_encodings)
+    logger.info(f"عدد البصمات المحملة: {encoding_count}")
     
     app.run(
         debug=Config.DEBUG,
